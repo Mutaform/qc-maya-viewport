@@ -1,0 +1,82 @@
+name: Publish Blender Extension Repository
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "maya_viewport_match/**"
+      - "tools/**"
+      - ".github/workflows/pages.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build extension ZIP
+        shell: pwsh
+        run: tools/build_release.ps1
+
+      - name: Check ZIP contents
+        shell: pwsh
+        run: |
+          Expand-Archive -LiteralPath dist/maya_viewport_match.zip -DestinationPath verify -Force
+          if (-not (Test-Path -LiteralPath "verify/blender_manifest.toml")) {
+            throw "Invalid extension ZIP: missing blender_manifest.toml"
+          }
+
+      - name: Download Blender
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://download.blender.org/release/Blender5.1/blender-5.1.0-windows-x64.zip" -OutFile blender.zip
+          Expand-Archive -LiteralPath blender.zip -DestinationPath blender -Force
+
+      - name: Prepare Blender Extension Repository
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path pages | Out-Null
+          Copy-Item -LiteralPath dist/maya_viewport_match.zip -Destination pages/maya_viewport_match.zip -Force
+
+          $blender = Get-ChildItem -Path blender -Recurse -Filter blender.exe | Select-Object -First 1
+          & $blender.FullName --command extension server-generate --repo-dir pages
+
+          @'
+          <!doctype html>
+          <html>
+            <head>
+              <meta charset="utf-8">
+              <title>QC Maya Viewport</title>
+            </head>
+            <body>
+              <h1>QC Maya Viewport</h1>
+              <p><a href="index.json">Blender Extension Repository Index</a></p>
+              <p><a href="maya_viewport_match.zip">Download Blender Extension ZIP</a></p>
+            </body>
+          </html>
+          '@ | Set-Content -Path pages/index.html -Encoding UTF8
+
+          $index = Get-Content -LiteralPath pages/index.json -Raw
+          if ($index -match '"data"\s*:\s*\[\s*\]') {
+            throw "Generated index.json is empty. Blender did not recognize the extension ZIP."
+          }
+
+      - name: Publish to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: pages
+          publish_branch: gh-pages
+          force_orphan: true
