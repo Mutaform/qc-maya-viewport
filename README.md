@@ -15,7 +15,7 @@ Add the extension repository URL in Blender:
 https://mutaform.github.io/qc-maya-viewport/index.json
 ```
 
-Then sync repositories and search for `QC Maya Vieport`.
+Then sync repositories and search for `QC Maya Viewport`.
 
 ## Manual Install
 
@@ -23,7 +23,7 @@ Then sync repositories and search for `QC Maya Vieport`.
 2. In Blender, open `Edit > Preferences > Extensions`.
 3. Use `Install from Disk`.
 4. Select `maya_viewport_match.zip`.
-5. Enable `QC Maya Vieport`.
+5. Enable `QC Maya Viewport`.
 
 ## Build Release ZIP
 
@@ -59,3 +59,4 @@ tools/
 ## License
 
 This project is licensed under GPL-3.0-or-later, matching the Blender Extension manifest.
+

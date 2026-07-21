@@ -17,7 +17,7 @@ def draw_view3d_header(self, context):
 
 
 class MVM_PT_custom_shading(bpy.types.Panel):
-    bl_label = "QC Maya Vieport"
+    bl_label = "QC Maya Viewport"
     bl_idname = "MVM_PT_custom_shading"
     bl_space_type = "VIEW_3D"
     bl_region_type = "HEADER"

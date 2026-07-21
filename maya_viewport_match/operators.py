@@ -42,7 +42,7 @@ def _scene_material_images(scene):
 
 class MVM_OT_disable_viewer(bpy.types.Operator):
     bl_idname = "mvm.disable_viewer"
-    bl_label = "Disable QC Maya Vieport"
+    bl_label = "Disable QC Maya Viewport"
 
     def execute(self, context):
         custom_engine.disable()
@@ -55,23 +55,23 @@ class MVM_OT_disable_viewer(bpy.types.Operator):
 
 class MVM_OT_apply_custom(bpy.types.Operator):
     bl_idname = "mvm.apply_custom"
-    bl_label = "QC Maya Vieport"
-    bl_description = "Toggle the QC Maya Vieport GPU renderer"
+    bl_label = "QC Maya Viewport"
+    bl_description = "Toggle the QC Maya Viewport GPU renderer"
 
     def execute(self, context):
         if custom_engine.is_enabled():
             bpy.ops.mvm.disable_viewer()
-            self.report({"INFO"}, "QC Maya Vieport disabled")
+            self.report({"INFO"}, "QC Maya Viewport disabled")
         else:
             custom_engine.enable(context)
-            self.report({"INFO"}, "QC Maya Vieport enabled")
+            self.report({"INFO"}, "QC Maya Viewport enabled")
         return {"FINISHED"}
 
 
 class MVM_OT_set_custom_mode(bpy.types.Operator):
     bl_idname = "mvm.set_custom_mode"
-    bl_label = "Set QC Maya Vieport Mode"
-    bl_description = "Select a QC Maya Vieport diagnostic shading mode"
+    bl_label = "Set QC Maya Viewport Mode"
+    bl_description = "Select a QC Maya Viewport diagnostic shading mode"
 
     mode: bpy.props.StringProperty()
 

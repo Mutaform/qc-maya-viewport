@@ -8,12 +8,12 @@ from .ui import draw_view3d_header
 
 
 bl_info = {
-    "name": "QC Maya Vieport",
+    "name": "QC Maya Viewport",
     "author": "Mutaform Studio",
     "version": VERSION,
     "blender": (5, 1, 0),
     "location": "3D Viewport Header",
-    "description": "QC Maya Vieport diagnostic GPU shading",
+    "description": "QC Maya Viewport diagnostic GPU shading",
     "category": "3D View",
 }
 

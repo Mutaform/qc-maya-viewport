@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "maya_viewport_match"
-version = "0.22.6"
-name = "QC Maya Vieport"
-tagline = "QC Maya Vieport diagnostic GPU shading for Blender"
+version = "0.22.7"
+name = "QC Maya Viewport"
+tagline = "QC Maya Viewport diagnostic GPU shading for Blender"
 maintainer = "Mutaform Studio"
 type = "add-on"
 
