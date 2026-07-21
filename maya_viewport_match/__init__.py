@@ -9,7 +9,7 @@ from .ui import draw_view3d_header
 
 bl_info = {
     "name": "QC Maya Vieport",
-    "author": "Mutaform Studio / Codex",
+    "author": "Mutaform Studio",
     "version": VERSION,
     "blender": (5, 1, 0),
     "location": "3D Viewport Header",
