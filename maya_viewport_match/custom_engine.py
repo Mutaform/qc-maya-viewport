@@ -12,6 +12,9 @@ from . import state
 _HANDLER = None
 _CPU_GEOMETRY = {}
 _GPU_GEOMETRY = {}
+_GPU_OUTLINE_MASKS = {}
+_OUTLINE_OFFSCREEN = None
+_OUTLINE_OFFSCREEN_SIZE = None
 _EDIT_OVERLAY_BATCHES = {}
 _EDIT_OVERLAY_DIRTY = set()
 _EDIT_DIRTY = set()
@@ -150,8 +153,14 @@ def _create_shader():
     info.push_constant("INT", "aoOnly")
     info.push_constant("INT", "useAo")
     info.push_constant("INT", "defaultMaterial")
+    info.push_constant("INT", "isPerspective")
+    info.push_constant("INT", "alphaEnabled")
+    info.push_constant("INT", "alphaChannel")
+    info.push_constant("INT", "alphaClip")
+    info.push_constant("FLOAT", "materialAlpha")
     info.sampler(0, "FLOAT_2D", "normalTexture")
     info.sampler(1, "FLOAT_2D", "aoTexture")
+    info.sampler(2, "FLOAT_2D", "alphaTexture")
     info.vertex_in(0, "VEC3", "position")
     info.vertex_in(1, "VEC3", "normal")
     info.vertex_in(2, "VEC4", "tangent")
@@ -175,17 +184,34 @@ def _create_shader():
         """
         void main()
         {
-            if (!gl_FrontFacing) {
-                fragColor = vec4(0.0, 0.0, 0.0, 1.0);
-                return;
+            float opacity = 1.0;
+            if (defaultMaterial == 0) {
+                opacity = materialAlpha;
+                if (alphaEnabled != 0) {
+                    vec4 alphaSample = texture(alphaTexture, texCoord);
+                    opacity = alphaChannel != 0
+                        ? alphaSample.a : alphaSample.r;
+                }
+            }
+            if (alphaClip != 0) {
+                if (opacity < 0.5) {
+                    discard;
+                }
+                opacity = 1.0;
+            }
+            if (opacity <= 0.001) {
+                discard;
             }
             if (aoOnly != 0) {
                 vec3 color = aoEnabled != 0
                     ? texture(aoTexture, texCoord).rgb : vec3(1.0);
-                fragColor = vec4(color, 1.0);
+                fragColor = vec4(color, opacity);
                 return;
             }
             vec3 n = normalize(viewNormal);
+            if (!gl_FrontFacing) {
+                n = -n;
+            }
             if (defaultMaterial == 0) {
                 vec3 mapNormal = texture(normalTexture, texCoord).rgb * 2.0 - 1.0;
                 vec3 t = normalize(viewTangent.xyz - n * dot(n, viewTangent.xyz));
@@ -193,7 +219,11 @@ def _create_shader():
                 n = normalize(mat3(t, b, n) * mapNormal);
             }
 
-            vec3 viewDirection = normalize(-viewPosition);
+            vec3 viewDirection = isPerspective != 0
+                ? normalize(-viewPosition) : vec3(0.0, 0.0, 1.0);
+            if (dot(n, viewDirection) < 0.0) {
+                n = -n;
+            }
             vec3 keyDirection = normalize(vec3(lightX, lightY, 1.0));
             vec3 fillDirection = normalize(vec3(-0.34, 0.28, 0.90));
             float keyDiffuse = max(dot(n, keyDirection), 0.0);
@@ -208,7 +238,7 @@ def _create_shader():
             float specular = defaultMaterial == 0
                 ? specularLevel * pow(max(dot(n, halfVector), 0.0), blinnExponent) : 0.0;
             vec3 color = diffuse + vec3(specular);
-            fragColor = vec4(color, 1.0);
+            fragColor = vec4(color, opacity);
         }
         """
     )
@@ -241,6 +271,82 @@ def _create_overlay_shader():
         void main()
         {
             fragColor = vertexColor;
+        }
+        """
+    )
+    return gpu.shader.create_from_info(info)
+
+
+def _create_outline_mask_shader():
+    info = gpu.types.GPUShaderCreateInfo()
+    info.push_constant("MAT4", "mvp")
+    info.vertex_in(0, "VEC3", "position")
+    info.fragment_out(0, "VEC4", "fragColor")
+    info.vertex_source(
+        """
+        void main()
+        {
+            gl_Position = mvp * vec4(position, 1.0);
+        }
+        """
+    )
+    info.fragment_source(
+        """
+        void main()
+        {
+            fragColor = vec4(1.0);
+        }
+        """
+    )
+    return gpu.shader.create_from_info(info)
+
+
+def _create_outline_composite_shader():
+    interface = gpu.types.GPUStageInterfaceInfo("mvm_outline_composite_interface")
+    interface.smooth("VEC2", "texCoord")
+
+    info = gpu.types.GPUShaderCreateInfo()
+    info.push_constant("INT", "outlineRadius")
+    info.push_constant("VEC4", "outlineColor")
+    info.sampler(0, "FLOAT_2D", "maskTexture")
+    info.vertex_in(0, "VEC2", "position")
+    info.vertex_in(1, "VEC2", "uv")
+    info.vertex_out(interface)
+    info.fragment_out(0, "VEC4", "fragColor")
+    info.vertex_source(
+        """
+        void main()
+        {
+            texCoord = uv;
+            gl_Position = vec4(position, 0.0, 1.0);
+        }
+        """
+    )
+    info.fragment_source(
+        """
+        void main()
+        {
+            ivec2 size = textureSize(maskTexture, 0);
+            ivec2 pixel = clamp(
+                ivec2(texCoord * vec2(size)), ivec2(0), size - ivec2(1));
+            float minimumMask = 1.0;
+            float maximumMask = 0.0;
+            for (int y = -2; y <= 2; ++y) {
+                for (int x = -2; x <= 2; ++x) {
+                    if (abs(x) > outlineRadius || abs(y) > outlineRadius) {
+                        continue;
+                    }
+                    ivec2 samplePixel = clamp(
+                        pixel + ivec2(x, y), ivec2(0), size - ivec2(1));
+                    float mask = texelFetch(maskTexture, samplePixel, 0).r;
+                    minimumMask = min(minimumMask, mask);
+                    maximumMask = max(maximumMask, mask);
+                }
+            }
+            if (maximumMask - minimumMask < 0.5) {
+                discard;
+            }
+            fragColor = outlineColor;
         }
         """
     )
@@ -546,6 +652,27 @@ def _ao_image(material):
     return None
 
 
+def _alpha_settings(material):
+    if material is None or not material.use_nodes:
+        return None, 0, 1.0
+    for node in material.node_tree.nodes:
+        if node.type != "BSDF_PRINCIPLED":
+            continue
+        alpha = node.inputs.get("Alpha")
+        if alpha is None:
+            return None, 0, 1.0
+        default_alpha = float(alpha.default_value)
+        if not alpha.is_linked:
+            return None, 0, default_alpha
+        link = alpha.links[0]
+        source = link.from_node
+        if source.type == "TEX_IMAGE" and source.image is not None:
+            channel = 1 if link.from_socket.name == "Alpha" else 0
+            return source.image, channel, default_alpha
+        return None, 0, default_alpha
+    return None, 0, 1.0
+
+
 def _triangulate_ngons(mesh):
     if not any(polygon.loop_total > 4 for polygon in mesh.polygons):
         return False
@@ -672,6 +799,105 @@ def _geometry(obj, material_index, depsgraph):
             bpy.data.meshes.remove(temporary)
 
 
+def _outline_mask_batch(shader, key, data):
+    cached = _GPU_OUTLINE_MASKS.get(key)
+    if cached is not None and cached[0] is data:
+        return cached[1]
+    batch = batch_for_shader(
+        shader,
+        "TRIS",
+        {"position": data["position"]},
+    )
+    _GPU_OUTLINE_MASKS[key] = (data, batch)
+    return batch
+
+
+def _outline_offscreen(width, height):
+    global _OUTLINE_OFFSCREEN, _OUTLINE_OFFSCREEN_SIZE
+    size = (width, height)
+    if _OUTLINE_OFFSCREEN is not None and _OUTLINE_OFFSCREEN_SIZE != size:
+        _OUTLINE_OFFSCREEN.free()
+        _OUTLINE_OFFSCREEN = None
+    if _OUTLINE_OFFSCREEN is None:
+        _OUTLINE_OFFSCREEN = gpu.types.GPUOffScreen(width, height, format="RGBA8")
+        _OUTLINE_OFFSCREEN_SIZE = size
+    return _OUTLINE_OFFSCREEN
+
+
+def _draw_object_outlines(context, view, projection, depsgraph):
+    space = context.space_data
+    show_outlines = bool(
+        space
+        and space.overlay.show_overlays
+        and getattr(space.overlay, "show_outline_selected", True)
+    )
+    if context.mode != "OBJECT" or not show_outlines:
+        return 0
+
+    selected = [
+        obj for obj in context.scene.objects
+        if obj.type == "MESH" and obj.select_get() and obj.visible_get()
+    ]
+    if not selected:
+        return 0
+
+    mask_shader = _create_outline_mask_shader()
+    composite_shader = _create_outline_composite_shader()
+    theme = context.preferences.themes[0].view_3d
+    active = context.view_layer.objects.active
+    outline_radius = max(
+        1,
+        min(2, round(float(getattr(theme, "outline_width", 1.0)))),
+    )
+    offscreen = _outline_offscreen(context.region.width, context.region.height)
+    quad = batch_for_shader(
+        composite_shader,
+        "TRI_FAN",
+        {
+            "position": ((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)),
+            "uv": ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),
+        },
+    )
+    used_keys = set()
+    mask_triangles = 0
+
+    for obj in selected:
+        evaluated = obj.evaluated_get(depsgraph)
+        with offscreen.bind():
+            framebuffer = gpu.state.active_framebuffer_get()
+            framebuffer.clear(color=(0.0, 0.0, 0.0, 0.0), depth=1.0)
+            gpu.state.blend_set("NONE")
+            gpu.state.depth_test_set("LESS_EQUAL")
+            gpu.state.depth_mask_set(True)
+            mask_shader.bind()
+            mask_shader.uniform_float(
+                "mvp", projection @ view @ evaluated.matrix_world
+            )
+            for material_index in range(max(1, len(obj.material_slots))):
+                data = _geometry(obj, material_index, depsgraph)
+                if data is None:
+                    continue
+                key = (obj.as_pointer(), material_index)
+                used_keys.add(key)
+                _outline_mask_batch(mask_shader, key, data).draw(mask_shader)
+                mask_triangles += len(data["position"]) // 3
+
+        gpu.state.depth_test_set("NONE")
+        gpu.state.depth_mask_set(False)
+        gpu.state.blend_set("ALPHA")
+        composite_shader.bind()
+        composite_shader.uniform_sampler("maskTexture", offscreen.texture_color)
+        composite_shader.uniform_int("outlineRadius", outline_radius)
+        color = theme.object_active if obj == active else theme.object_selected
+        composite_shader.uniform_float("outlineColor", (*color[:], 1.0))
+        quad.draw(composite_shader)
+
+    gpu.state.blend_set("NONE")
+    for key in [key for key in _GPU_OUTLINE_MASKS if key not in used_keys]:
+        del _GPU_OUTLINE_MASKS[key]
+    return mask_triangles
+
+
 def _draw():
     global _LAST_ERROR, _DRAW_COUNT, _LAST_TRIANGLES, _LAST_TIMINGS
     context = bpy.context
@@ -706,6 +932,11 @@ def _draw():
         shader.uniform_int("aoOnly", _PARAMS["ao_only"])
         shader.uniform_int("useAo", _PARAMS["use_ao"])
         shader.uniform_int("defaultMaterial", _PARAMS["default_material"])
+        shader.uniform_int("isPerspective", int(region_data.is_perspective))
+        shader.uniform_int("alphaEnabled", 0)
+        shader.uniform_int("alphaChannel", 0)
+        shader.uniform_int("alphaClip", 0)
+        shader.uniform_float("materialAlpha", 1.0)
 
         view = region_data.view_matrix
         projection = region_data.window_matrix
@@ -714,19 +945,23 @@ def _draw():
         upload_time = 0.0
         draw_time = 0.0
         used_geometry_keys = set()
+        opaque_items = []
+        transparent_items = []
         for obj in context.scene.objects:
             if obj.type != "MESH" or not obj.visible_get():
                 continue
             evaluated_obj = obj.evaluated_get(depsgraph)
             model_view = view @ evaluated_obj.matrix_world
             normal_matrix = Matrix(model_view.to_3x3()).inverted().transposed()
-            shader.uniform_float("modelView", model_view)
-            shader.uniform_float("normalMatrix", normal_matrix)
-            shader.uniform_float("mvp", projection @ model_view)
+            mvp = projection @ model_view
+            sort_depth = model_view.translation.z
             for material_index in range(max(1, len(obj.material_slots))):
                 material = obj.material_slots[material_index].material if obj.material_slots else None
                 image = _normal_image(material)
                 ao_image = _ao_image(material)
+                alpha_image, alpha_channel, material_alpha = _alpha_settings(
+                    material
+                )
                 part_start = time.perf_counter()
                 data = _geometry(obj, material_index, depsgraph)
                 geometry_time += time.perf_counter() - part_start
@@ -739,18 +974,63 @@ def _draw():
                 if uploaded:
                     upload_time += time.perf_counter() - part_start
                 _LAST_TRIANGLES += len(data["position"]) // 3
+                item = (
+                    sort_depth, batch, model_view, normal_matrix, mvp,
+                    image, ao_image, alpha_image, alpha_channel,
+                    material_alpha,
+                )
+                is_transparent = (
+                    not _PARAMS["default_material"]
+                    and alpha_image is None
+                    and material_alpha < 0.999
+                )
+                (transparent_items if is_transparent else opaque_items).append(item)
+
+        def draw_items(items):
+            nonlocal draw_time
+            for (
+                _sort_depth, batch, model_view, normal_matrix, mvp,
+                image, ao_image, alpha_image, alpha_channel,
+                material_alpha,
+            ) in items:
+                shader.uniform_float("modelView", model_view)
+                shader.uniform_float("normalMatrix", normal_matrix)
+                shader.uniform_float("mvp", mvp)
                 texture = _gpu_texture(image, (0.5, 0.5, 1.0, 1.0))
                 ao_texture = _gpu_texture(ao_image, (1.0, 1.0, 1.0, 1.0))
+                alpha_texture = _gpu_texture(
+                    alpha_image, (1.0, 1.0, 1.0, 1.0)
+                )
                 shader.uniform_sampler("normalTexture", texture)
                 shader.uniform_sampler("aoTexture", ao_texture)
+                shader.uniform_sampler("alphaTexture", alpha_texture)
                 shader.uniform_int("aoEnabled", int(ao_image is not None))
+                shader.uniform_int("alphaEnabled", int(alpha_image is not None))
+                shader.uniform_int("alphaChannel", alpha_channel)
+                shader.uniform_int("alphaClip", int(alpha_image is not None))
+                shader.uniform_float("materialAlpha", material_alpha)
                 part_start = time.perf_counter()
                 batch.draw(shader)
                 draw_time += time.perf_counter() - part_start
+                del alpha_texture
                 del ao_texture
                 del texture
+
+        gpu.state.blend_set("NONE")
+        gpu.state.depth_mask_set(True)
+        draw_items(opaque_items)
+        if transparent_items:
+            gpu.state.blend_set("ALPHA")
+            gpu.state.depth_mask_set(False)
+            draw_items(sorted(transparent_items, key=lambda item: item[0]))
+            gpu.state.blend_set("NONE")
         for key in [key for key in _GPU_GEOMETRY if key not in used_geometry_keys]:
             del _GPU_GEOMETRY[key]
+        outline_start = time.perf_counter()
+        outline_triangles = _draw_object_outlines(
+            context, view, projection, depsgraph
+        )
+        outline_time = time.perf_counter() - outline_start
         overlay_start = time.perf_counter()
         overlay_elements, overlay_rebuild = _draw_edit_overlays(
             context, view, projection, depsgraph
@@ -761,6 +1041,8 @@ def _draw():
             "geometry_ms": geometry_time * 1000.0,
             "upload_ms": upload_time * 1000.0,
             "draw_ms": draw_time * 1000.0,
+            "outline_ms": outline_time * 1000.0,
+            "outline_triangles": outline_triangles,
             "overlay_ms": overlay_time * 1000.0,
             "overlay_rebuild_ms": overlay_rebuild * 1000.0,
             "overlay_elements": overlay_elements,
@@ -771,6 +1053,7 @@ def _draw():
         _LAST_ERROR = "%s: %s" % (type(error).__name__, error)
     finally:
         gpu.state.face_culling_set("NONE")
+        gpu.state.blend_set("NONE")
         gpu.state.depth_mask_set(False)
         gpu.state.depth_test_set("NONE")
         if shader is not None:
@@ -803,12 +1086,17 @@ def enable(context):
 
 
 def disable():
-    global _HANDLER
+    global _HANDLER, _OUTLINE_OFFSCREEN, _OUTLINE_OFFSCREEN_SIZE
     if _HANDLER is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_HANDLER, "WINDOW")
         _HANDLER = None
     _CPU_GEOMETRY.clear()
     _GPU_GEOMETRY.clear()
+    _GPU_OUTLINE_MASKS.clear()
+    if _OUTLINE_OFFSCREEN is not None:
+        _OUTLINE_OFFSCREEN.free()
+        _OUTLINE_OFFSCREEN = None
+        _OUTLINE_OFFSCREEN_SIZE = None
     _EDIT_OVERLAY_BATCHES.clear()
     _EDIT_OVERLAY_DIRTY.clear()
     _EDIT_DIRTY.clear()
@@ -856,6 +1144,7 @@ def debug_stats():
         "triangles": _LAST_TRIANGLES,
         "cpu_batches": len(_CPU_GEOMETRY),
         "gpu_batches": len(_GPU_GEOMETRY),
+        "outline_mask_batches": len(_GPU_OUTLINE_MASKS),
         "overlay_batches": len(_EDIT_OVERLAY_BATCHES),
         "error": _LAST_ERROR,
         "timings": dict(_LAST_TIMINGS),
