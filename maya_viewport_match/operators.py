@@ -83,6 +83,19 @@ class MVM_OT_set_custom_mode(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class MVM_OT_set_normal_convention(bpy.types.Operator):
+    bl_idname = "mvm.set_normal_convention"
+    bl_label = "Set Normal Map Convention"
+    bl_description = "Switch the global green-channel convention for normal maps"
+
+    convention: bpy.props.StringProperty()
+
+    def execute(self, context):
+        custom_engine.set_normal_convention(self.convention)
+        _redraw_viewports(context)
+        return {"FINISHED"}
+
+
 class MVM_OT_reimport_textures(bpy.types.Operator):
     bl_idname = "mvm.reimport_textures"
     bl_label = "Reimport Textures"
@@ -122,5 +135,6 @@ CLASSES = (
     MVM_OT_disable_viewer,
     MVM_OT_apply_custom,
     MVM_OT_set_custom_mode,
+    MVM_OT_set_normal_convention,
     MVM_OT_reimport_textures,
 )

@@ -51,6 +51,21 @@ class MVM_PT_custom_shading(bpy.types.Panel):
         )
         layout.separator()
         layout.label(text=f"ver {VERSION_STRING}")
+        layout.separator()
+        convention = custom_engine.normal_convention()
+        row = layout.row(align=True)
+        operator = row.operator(
+            "mvm.set_normal_convention",
+            text="OpenGL",
+            depress=convention == "OPENGL",
+        )
+        operator.convention = "OPENGL"
+        operator = row.operator(
+            "mvm.set_normal_convention",
+            text="DirectX",
+            depress=convention == "DIRECTX",
+        )
+        operator.convention = "DIRECTX"
 
 
 CLASSES = (MVM_PT_custom_shading,)

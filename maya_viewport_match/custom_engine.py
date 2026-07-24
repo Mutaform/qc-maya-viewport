@@ -41,6 +41,7 @@ _PARAMS = {
     "ao_only": 0,
     "use_ao": 1,
     "default_material": 0,
+    "directx_normal": 0,
 }
 
 
@@ -154,6 +155,7 @@ def _create_shader():
     info.push_constant("INT", "useAo")
     info.push_constant("INT", "defaultMaterial")
     info.push_constant("INT", "isPerspective")
+    info.push_constant("INT", "directXNormal")
     info.push_constant("INT", "alphaEnabled")
     info.push_constant("INT", "alphaChannel")
     info.push_constant("INT", "alphaClip")
@@ -214,6 +216,9 @@ def _create_shader():
             }
             if (defaultMaterial == 0) {
                 vec3 mapNormal = texture(normalTexture, texCoord).rgb * 2.0 - 1.0;
+                if (directXNormal != 0) {
+                    mapNormal.y = -mapNormal.y;
+                }
                 vec3 t = normalize(viewTangent.xyz - n * dot(n, viewTangent.xyz));
                 vec3 b = normalize(cross(n, t)) * viewTangent.w;
                 n = normalize(mat3(t, b, n) * mapNormal);
@@ -933,6 +938,7 @@ def _draw():
         shader.uniform_int("useAo", _PARAMS["use_ao"])
         shader.uniform_int("defaultMaterial", _PARAMS["default_material"])
         shader.uniform_int("isPerspective", int(region_data.is_perspective))
+        shader.uniform_int("directXNormal", _PARAMS["directx_normal"])
         shader.uniform_int("alphaEnabled", 0)
         shader.uniform_int("alphaChannel", 0)
         shader.uniform_int("alphaClip", 0)
@@ -1106,6 +1112,7 @@ def disable():
     _PARAMS["ao_only"] = 0
     _PARAMS["use_ao"] = 1
     _PARAMS["default_material"] = 0
+    _PARAMS["directx_normal"] = 0
 
 
 def is_enabled():
@@ -1136,6 +1143,21 @@ def display_mode():
     if _PARAMS["default_material"]:
         return "DEFAULT_MATERIAL"
     return "NORMAL_AO" if _PARAMS["use_ao"] else "NORMAL_ONLY"
+
+
+def set_normal_convention(convention):
+    conventions = {
+        "OPENGL": 0,
+        "DIRECTX": 1,
+    }
+    if convention not in conventions:
+        raise ValueError("Unknown normal map convention: %s" % convention)
+    _PARAMS["directx_normal"] = conventions[convention]
+    return convention
+
+
+def normal_convention():
+    return "DIRECTX" if _PARAMS["directx_normal"] else "OPENGL"
 
 
 def debug_stats():
