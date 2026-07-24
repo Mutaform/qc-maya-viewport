@@ -1,0 +1,22 @@
+{
+  "version": "v1",
+  "blocklist": [],
+  "data": [
+    {
+      "schema_version": "1.0.0",
+      "id": "maya_viewport_match",
+      "name": "QC Maya Viewport",
+      "tagline": "QC Maya Viewport diagnostic GPU shading for Blender",
+      "version": "0.22.8",
+      "type": "add-on",
+      "maintainer": "Mutaform Studio",
+      "license": [
+        "SPDX:GPL-3.0-or-later"
+      ],
+      "blender_version_min": "5.1.0",
+      "archive_url": "./maya_viewport_match.zip",
+      "archive_size": 14903,
+      "archive_hash": "sha256:9e1e586f7b619633f96ee514ef5cdeb33b9893f0a7d77a7422c247f9e57d67bf"
+    }
+  ]
+}
