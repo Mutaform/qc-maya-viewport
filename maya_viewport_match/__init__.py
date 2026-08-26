@@ -1,7 +1,10 @@
 import bpy
 
 from . import camera_sync
+from . import custom_engine
+from . import origin
 from .metadata import VERSION
+from .preferences import CLASSES as PREFERENCE_CLASSES
 from .operators import CLASSES as OPERATOR_CLASSES
 from .ui import CLASSES as UI_CLASSES
 from .ui import draw_view3d_header
@@ -17,13 +20,15 @@ bl_info = {
     "category": "3D View",
 }
 
-CLASSES = OPERATOR_CLASSES + UI_CLASSES
+CLASSES = PREFERENCE_CLASSES + OPERATOR_CLASSES + UI_CLASSES
 LEGACY_CLASSES = (
     "MVM_OT_apply_standard",
     "MVM_OT_enable",
     "MVM_OT_toggle_ao_only",
     "MVM_OT_follow_light",
     "MVM_PT_panel",
+    # 0.30.0 briefly made the shading list a menu; drop it again on load.
+    "MVM_MT_custom_shading",
 )
 
 
@@ -49,6 +54,10 @@ def _remove_registered_class(class_name):
 
 
 def register():
+    # A reload or a re-enable can leave the previous module's draw handler
+    # running, which would keep hijacking the viewport with nothing left to
+    # switch it off.
+    custom_engine.purge_stale_handlers()
     _remove_header_callbacks()
     for class_name in LEGACY_CLASSES:
         _remove_registered_class(class_name)
@@ -59,9 +68,12 @@ def register():
     if hasattr(bpy.types.WindowManager, "mvm_follow_running"):
         del bpy.types.WindowManager.mvm_follow_running
     bpy.types.VIEW3D_HT_header.append(draw_view3d_header)
+    origin.register_handler()
 
 
 def unregister():
+    origin.unregister_handler()
+    custom_engine.disable()
     _remove_header_callbacks()
     for cls in reversed(CLASSES):
         _remove_registered_class(cls.__name__)

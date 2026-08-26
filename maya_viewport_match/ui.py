@@ -33,6 +33,7 @@ class MVM_PT_custom_shading(bpy.types.Panel):
             ("NORMAL_ONLY", "Normal Only", "NORMALS_FACE"),
             ("NORMAL_AO", "Normal + AO", "MATERIAL"),
             ("AO_ONLY", "AO Only", "SHADING_TEXTURE"),
+            ("ROUGHNESS_ONLY", "Roughness Only", "SHADING_RENDERED"),
             ("DEFAULT_MATERIAL", "Default Material", "MATERIAL"),
         )
         for mode, label, icon in modes:
@@ -44,6 +45,11 @@ class MVM_PT_custom_shading(bpy.types.Panel):
             )
             operator.mode = mode
         layout.separator()
+        layout.operator(
+            "mvm.load_textures",
+            text="Find Textures",
+            icon="FILEBROWSER",
+        )
         layout.operator(
             "mvm.reimport_textures",
             text="Reimport Textures",
@@ -66,6 +72,12 @@ class MVM_PT_custom_shading(bpy.types.Panel):
             depress=convention == "DIRECTX",
         )
         operator.convention = "DIRECTX"
+        layout.separator()
+        layout.operator(
+            "mvm.suffix_settings",
+            text="Settings",
+            icon="PREFERENCES",
+        )
 
 
 CLASSES = (MVM_PT_custom_shading,)

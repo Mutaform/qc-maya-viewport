@@ -7,6 +7,7 @@ from gpu_extras.batch import batch_for_shader
 from mathutils import Matrix
 
 from . import state
+from . import texture_loader
 
 
 _HANDLER = None
@@ -39,6 +40,7 @@ _PARAMS = {
     "light_x": 0.0,
     "light_y": 0.25,
     "ao_only": 0,
+    "rough_only": 0,
     "use_ao": 1,
     "default_material": 0,
     "directx_normal": 0,
@@ -123,10 +125,30 @@ def _configure_texture(texture):
     texture.anisotropic_filter(True)
 
 
+def _has_pixels(image):
+    """False for an image whose file is missing or otherwise unreadable.
+
+    Handing one of those to the GPU yields a black texture, which reads as a
+    normal pointing away from the light - the surface goes pitch black instead
+    of falling back to flat shading.
+    """
+    if image is None:
+        return False
+    try:
+        width, height = image.size
+    except (AttributeError, ReferenceError):
+        return False
+    return width > 0 and height > 0
+
+
 def _gpu_texture(image, fallback):
-    if image is not None:
-        texture = gpu.texture.from_image(image)
-    else:
+    texture = None
+    if _has_pixels(image):
+        try:
+            texture = gpu.texture.from_image(image)
+        except (RuntimeError, ValueError, SystemError):
+            texture = None
+    if texture is None:
         buffer = gpu.types.Buffer("FLOAT", 4, fallback)
         texture = gpu.types.GPUTexture((1, 1), format="RGBA32F", data=buffer)
     _configure_texture(texture)
@@ -143,7 +165,9 @@ def _create_shader():
     info = gpu.types.GPUShaderCreateInfo()
     info.push_constant("MAT4", "mvp")
     info.push_constant("MAT4", "modelView")
-    info.push_constant("MAT3", "normalMatrix")
+    # MAT3 padding inside the push-constant block is fragile: adding other
+    # constants shifted it and object normals came through as garbage.
+    info.push_constant("MAT4", "normalMatrix")
     info.push_constant("FLOAT", "diffuseLevel")
     info.push_constant("FLOAT", "specularLevel")
     info.push_constant("FLOAT", "blinnExponent")
@@ -151,11 +175,16 @@ def _create_shader():
     info.push_constant("FLOAT", "lightX")
     info.push_constant("FLOAT", "lightY")
     info.push_constant("INT", "aoEnabled")
+    info.push_constant("INT", "aoChannel")
     info.push_constant("INT", "aoOnly")
+    info.push_constant("INT", "roughEnabled")
+    info.push_constant("INT", "roughChannel")
+    info.push_constant("INT", "roughOnly")
     info.push_constant("INT", "useAo")
     info.push_constant("INT", "defaultMaterial")
     info.push_constant("INT", "isPerspective")
     info.push_constant("INT", "directXNormal")
+    info.push_constant("INT", "rebuildNormalZ")
     info.push_constant("INT", "alphaEnabled")
     info.push_constant("INT", "alphaChannel")
     info.push_constant("INT", "alphaClip")
@@ -163,6 +192,7 @@ def _create_shader():
     info.sampler(0, "FLOAT_2D", "normalTexture")
     info.sampler(1, "FLOAT_2D", "aoTexture")
     info.sampler(2, "FLOAT_2D", "alphaTexture")
+    info.sampler(3, "FLOAT_2D", "roughTexture")
     info.vertex_in(0, "VEC3", "position")
     info.vertex_in(1, "VEC3", "normal")
     info.vertex_in(2, "VEC4", "tangent")
@@ -175,8 +205,10 @@ def _create_shader():
         {
             vec4 view = modelView * vec4(position, 1.0);
             viewPosition = view.xyz;
-            viewNormal = normalize(normalMatrix * normal);
-            viewTangent = vec4(normalize(normalMatrix * tangent.xyz), tangent.w);
+            mat3 normalBasis = mat3(normalMatrix);
+            viewNormal = normalize(normalBasis * normal);
+            viewTangent = vec4(
+                normalize(normalBasis * tangent.xyz), tangent.w);
             texCoord = uv;
             gl_Position = mvp * vec4(position, 1.0);
         }
@@ -184,6 +216,30 @@ def _create_shader():
     )
     info.fragment_source(
         """
+        vec3 pickChannel(vec4 value, int channel)
+        {
+            if (channel == 0) {
+                return vec3(value.r);
+            }
+            if (channel == 1) {
+                return vec3(value.g);
+            }
+            if (channel == 2) {
+                return vec3(value.b);
+            }
+            return value.rgb;
+        }
+
+        vec3 sampleAo()
+        {
+            return pickChannel(texture(aoTexture, texCoord), aoChannel);
+        }
+
+        vec3 sampleRoughness()
+        {
+            return pickChannel(texture(roughTexture, texCoord), roughChannel);
+        }
+
         void main()
         {
             float opacity = 1.0;
@@ -204,9 +260,15 @@ def _create_shader():
             if (opacity <= 0.001) {
                 discard;
             }
+            if (roughOnly != 0) {
+                // Nothing plugged in means the shader's own default, which
+                // reads as mid grey rather than a misleading white.
+                vec3 color = roughEnabled != 0 ? sampleRoughness() : vec3(0.5);
+                fragColor = vec4(color, opacity);
+                return;
+            }
             if (aoOnly != 0) {
-                vec3 color = aoEnabled != 0
-                    ? texture(aoTexture, texCoord).rgb : vec3(1.0);
+                vec3 color = aoEnabled != 0 ? sampleAo() : vec3(1.0);
                 fragColor = vec4(color, opacity);
                 return;
             }
@@ -216,6 +278,12 @@ def _create_shader():
             }
             if (defaultMaterial == 0) {
                 vec3 mapNormal = texture(normalTexture, texCoord).rgb * 2.0 - 1.0;
+                if (rebuildNormalZ != 0) {
+                    // Blue holds roughness, not Z, so derive Z from X and Y.
+                    mapNormal.z = sqrt(
+                        max(0.0, 1.0 - dot(mapNormal.xy, mapNormal.xy))
+                    );
+                }
                 if (directXNormal != 0) {
                     mapNormal.y = -mapNormal.y;
                 }
@@ -236,7 +304,7 @@ def _create_shader():
             vec3 baseColor = defaultMaterial != 0
                 ? vec3(0.5)
                 : (aoEnabled != 0 && useAo != 0
-                    ? texture(aoTexture, texCoord).rgb * 2.0 : vec3(1.0));
+                    ? sampleAo() * 2.0 : vec3(1.0));
             vec3 diffuse = baseColor * diffuseLevel
                 * (keyDiffuse + fillLevel * fillDiffuse);
             vec3 halfVector = normalize(keyDirection + viewDirection);
@@ -629,9 +697,24 @@ def _draw_edit_overlays(context, view, projection, depsgraph):
     return element_count, rebuild_time
 
 
-def _normal_image(material):
+def _normal_settings(material):
+    """Return the (image, rebuild_z) the normal shading should sample.
+
+    rebuild_z is set for an _NRM style map that keeps roughness in blue, so
+    the shader has to work Z back out of X and Y instead of reading it.
+    """
     if material is None or not material.use_nodes:
-        return None
+        return None, 0
+    fallback = None
+    for node in material.node_tree.nodes:
+        if node.type != "TEX_IMAGE" or node.image is None:
+            continue
+        if node.get(texture_loader.MAP_TAG) == texture_loader.NORMAL:
+            return node.image, 0
+        if node.get(texture_loader.NORMAL_Z_TAG):
+            fallback = node.image
+    if fallback is not None:
+        return fallback, 1
     for node in material.node_tree.nodes:
         if node.type != "NORMAL_MAP":
             continue
@@ -639,22 +722,87 @@ def _normal_image(material):
         if color and color.is_linked:
             source = color.links[0].from_node
             if source.type == "TEX_IMAGE":
-                return source.image
-    return None
+                return source.image, 0
+    return None, 0
 
 
-def _ao_image(material):
+def _ao_settings(material):
+    """Return the (image, channel) the AO modes should sample.
+
+    A node tagged by the texture loader wins, so a dedicated AO map works
+    even when Base Color holds the albedo. Channel -1 means use RGB, 0/1/2
+    pull a single channel out of a packed ORM style map. Without a tag the
+    original behaviour stands: whatever image feeds Base Color.
+    """
     if material is None or not material.use_nodes:
-        return None
+        return None, -1
+    for node in material.node_tree.nodes:
+        if node.type != "TEX_IMAGE" or node.image is None:
+            continue
+        channel = node.get(texture_loader.AO_CHANNEL_TAG)
+        if channel is not None:
+            return node.image, int(channel)
     for node in material.node_tree.nodes:
         if node.type != "BSDF_PRINCIPLED":
             continue
         base_color = node.inputs.get("Base Color")
         if base_color and base_color.is_linked:
             source = base_color.links[0].from_node
-            if source.type == "TEX_IMAGE":
-                return source.image
-    return None
+            # Only untagged nodes fall back: once the loader has put a real
+            # albedo there, it is not an AO map to be multiplied up.
+            if source.type == "TEX_IMAGE" \
+                    and source.get(texture_loader.MAP_TAG) is None:
+                return source.image, -1
+    return None, -1
+
+
+_SEPARATE_CHANNELS = {"Red": 0, "Green": 1, "Blue": 2}
+
+
+def _roughness_settings(material):
+    """Return the (image, channel) the Roughness Only mode should sample.
+
+    The loader tags whichever node supplies roughness, packed maps included.
+    Without a tag, follow whatever feeds the Principled Roughness socket,
+    stepping through a Separate Color to find the right channel.
+    """
+    if material is None or not material.use_nodes:
+        return None, -1
+    for node in material.node_tree.nodes:
+        if node.type != "TEX_IMAGE" or node.image is None:
+            continue
+        channel = node.get(texture_loader.ROUGH_CHANNEL_TAG)
+        if channel is not None:
+            return node.image, int(channel)
+
+    for node in material.node_tree.nodes:
+        if node.type != "BSDF_PRINCIPLED":
+            continue
+        socket = node.inputs.get("Roughness")
+        if socket is None or not socket.is_linked:
+            return None, -1
+        link = socket.links[0]
+        source = link.from_node
+        if source.type == "TEX_IMAGE":
+            return source.image, -1
+        if source.type in {"SEPARATE_COLOR", "SEPRGB"}:
+            channel = _SEPARATE_CHANNELS.get(link.from_socket.name, -1)
+            return _image_behind(source.inputs.get("Color"), channel)
+        if source.type == "GROUP":
+            # The unpack group hands roughness out of the blue channel; the
+            # image node carrying the normal-Z tag is the one to sample.
+            return _image_behind(source.inputs.get("Color"), 2)
+        return None, -1
+    return None, -1
+
+
+def _image_behind(socket, channel):
+    if socket is None or not socket.is_linked:
+        return None, -1
+    node = socket.links[0].from_node
+    if node.type != "TEX_IMAGE" or node.image is None:
+        return None, -1
+    return node.image, channel
 
 
 def _alpha_settings(material):
@@ -939,6 +1087,11 @@ def _draw():
         shader.uniform_int("defaultMaterial", _PARAMS["default_material"])
         shader.uniform_int("isPerspective", int(region_data.is_perspective))
         shader.uniform_int("directXNormal", _PARAMS["directx_normal"])
+        shader.uniform_int("aoChannel", -1)
+        shader.uniform_int("roughEnabled", 0)
+        shader.uniform_int("roughChannel", -1)
+        shader.uniform_int("roughOnly", _PARAMS["rough_only"])
+        shader.uniform_int("rebuildNormalZ", 0)
         shader.uniform_int("alphaEnabled", 0)
         shader.uniform_int("alphaChannel", 0)
         shader.uniform_int("alphaClip", 0)
@@ -958,13 +1111,16 @@ def _draw():
                 continue
             evaluated_obj = obj.evaluated_get(depsgraph)
             model_view = view @ evaluated_obj.matrix_world
-            normal_matrix = Matrix(model_view.to_3x3()).inverted().transposed()
+            normal_matrix = Matrix(
+                model_view.to_3x3()
+            ).inverted().transposed().to_4x4()
             mvp = projection @ model_view
             sort_depth = model_view.translation.z
             for material_index in range(max(1, len(obj.material_slots))):
                 material = obj.material_slots[material_index].material if obj.material_slots else None
-                image = _normal_image(material)
-                ao_image = _ao_image(material)
+                image, rebuild_z = _normal_settings(material)
+                ao_image, ao_channel = _ao_settings(material)
+                rough_image, rough_channel = _roughness_settings(material)
                 alpha_image, alpha_channel, material_alpha = _alpha_settings(
                     material
                 )
@@ -982,8 +1138,9 @@ def _draw():
                 _LAST_TRIANGLES += len(data["position"]) // 3
                 item = (
                     sort_depth, batch, model_view, normal_matrix, mvp,
-                    image, ao_image, alpha_image, alpha_channel,
-                    material_alpha,
+                    image, rebuild_z, ao_image, ao_channel,
+                    rough_image, rough_channel,
+                    alpha_image, alpha_channel, material_alpha,
                 )
                 is_transparent = (
                     not _PARAMS["default_material"]
@@ -996,28 +1153,40 @@ def _draw():
             nonlocal draw_time
             for (
                 _sort_depth, batch, model_view, normal_matrix, mvp,
-                image, ao_image, alpha_image, alpha_channel,
-                material_alpha,
+                image, rebuild_z, ao_image, ao_channel,
+                rough_image, rough_channel,
+                alpha_image, alpha_channel, material_alpha,
             ) in items:
                 shader.uniform_float("modelView", model_view)
                 shader.uniform_float("normalMatrix", normal_matrix)
                 shader.uniform_float("mvp", mvp)
+                # Every texture is built before any sampler is assigned:
+                # creating one in between disturbs the slots already bound,
+                # and the shader then samples the wrong texture.
                 texture = _gpu_texture(image, (0.5, 0.5, 1.0, 1.0))
                 ao_texture = _gpu_texture(ao_image, (1.0, 1.0, 1.0, 1.0))
                 alpha_texture = _gpu_texture(
                     alpha_image, (1.0, 1.0, 1.0, 1.0)
                 )
+                rough_texture = _gpu_texture(rough_image, (0.5, 0.5, 0.5, 1.0))
                 shader.uniform_sampler("normalTexture", texture)
                 shader.uniform_sampler("aoTexture", ao_texture)
                 shader.uniform_sampler("alphaTexture", alpha_texture)
-                shader.uniform_int("aoEnabled", int(ao_image is not None))
-                shader.uniform_int("alphaEnabled", int(alpha_image is not None))
+                shader.uniform_sampler("roughTexture", rough_texture)
+                has_alpha = _has_pixels(alpha_image)
+                shader.uniform_int("roughEnabled", int(_has_pixels(rough_image)))
+                shader.uniform_int("roughChannel", rough_channel)
+                shader.uniform_int("aoEnabled", int(_has_pixels(ao_image)))
+                shader.uniform_int("aoChannel", ao_channel)
+                shader.uniform_int("rebuildNormalZ", rebuild_z)
+                shader.uniform_int("alphaEnabled", int(has_alpha))
                 shader.uniform_int("alphaChannel", alpha_channel)
-                shader.uniform_int("alphaClip", int(alpha_image is not None))
+                shader.uniform_int("alphaClip", int(has_alpha))
                 shader.uniform_float("materialAlpha", material_alpha)
                 part_start = time.perf_counter()
                 batch.draw(shader)
                 draw_time += time.perf_counter() - part_start
+                del rough_texture
                 del alpha_texture
                 del ao_texture
                 del texture
@@ -1066,8 +1235,49 @@ def _draw():
             del shader
 
 
+# The draw handle also lives here, because a module-level variable is lost
+# when the add-on is reloaded or disabled while the viewer is running, and the
+# orphaned handler would then keep drawing with no way left to remove it.
+_HANDLER_KEY = "mvm_draw_handler"
+
+
+def purge_stale_handlers():
+    """Remove a draw handler left behind by an earlier module instance."""
+    handle = bpy.app.driver_namespace.get(_HANDLER_KEY)
+    if handle is None or handle is _HANDLER:
+        return False
+    try:
+        bpy.types.SpaceView3D.draw_handler_remove(handle, "WINDOW")
+    except (ValueError, TypeError):
+        pass
+    bpy.app.driver_namespace.pop(_HANDLER_KEY, None)
+    return True
+
+
+def adopt_scene_convention(context):
+    """Take the green-channel setting from the scene's Normal Map nodes.
+
+    The viewport setting is a module global, so it resets whenever the add-on
+    reloads while the nodes keep theirs. Reading the scene on the way in keeps
+    the two from drifting apart.
+    """
+    found = set()
+    for obj in context.scene.objects:
+        for slot in obj.material_slots:
+            material = slot.material
+            if material is None or not material.use_nodes:
+                continue
+            for node in material.node_tree.nodes:
+                if node.type == "NORMAL_MAP" and hasattr(node, "convention"):
+                    found.add(node.convention)
+    if len(found) == 1:
+        _PARAMS["directx_normal"] = int(found.pop() == "DIRECTX")
+
+
 def enable(context):
     global _HANDLER
+    purge_stale_handlers()
+    adopt_scene_convention(context)
     if _HANDLER is not None:
         return
     state.capture(context)
@@ -1084,6 +1294,7 @@ def enable(context):
         for material_index in range(max(1, len(obj.material_slots))):
             _geometry(obj, material_index, depsgraph)
     _HANDLER = bpy.types.SpaceView3D.draw_handler_add(_draw, (), "WINDOW", "POST_VIEW")
+    bpy.app.driver_namespace[_HANDLER_KEY] = _HANDLER
     for window in context.window_manager.windows:
         for area in window.screen.areas:
             if area.type == "VIEW_3D":
@@ -1093,9 +1304,14 @@ def enable(context):
 
 def disable():
     global _HANDLER, _OUTLINE_OFFSCREEN, _OUTLINE_OFFSCREEN_SIZE
+    purge_stale_handlers()
     if _HANDLER is not None:
-        bpy.types.SpaceView3D.draw_handler_remove(_HANDLER, "WINDOW")
+        try:
+            bpy.types.SpaceView3D.draw_handler_remove(_HANDLER, "WINDOW")
+        except (ValueError, TypeError):
+            pass
         _HANDLER = None
+    bpy.app.driver_namespace.pop(_HANDLER_KEY, None)
     _CPU_GEOMETRY.clear()
     _GPU_GEOMETRY.clear()
     _GPU_OUTLINE_MASKS.clear()
@@ -1110,6 +1326,7 @@ def disable():
     _EDIT_TOPOLOGY.clear()
     _remove_depsgraph_handlers()
     _PARAMS["ao_only"] = 0
+    _PARAMS["rough_only"] = 0
     _PARAMS["use_ao"] = 1
     _PARAMS["default_material"] = 0
     _PARAMS["directx_normal"] = 0
@@ -1125,19 +1342,22 @@ def last_error():
 
 def set_display_mode(mode):
     modes = {
-        "NORMAL_ONLY": (0, 0, 0),
-        "NORMAL_AO": (0, 1, 0),
-        "AO_ONLY": (1, 1, 0),
-        "DEFAULT_MATERIAL": (0, 0, 1),
+        "NORMAL_ONLY": (0, 0, 0, 0),
+        "NORMAL_AO": (0, 1, 0, 0),
+        "AO_ONLY": (1, 1, 0, 0),
+        "ROUGHNESS_ONLY": (0, 1, 0, 1),
+        "DEFAULT_MATERIAL": (0, 0, 1, 0),
     }
     if mode not in modes:
         raise ValueError("Unknown custom viewport mode: %s" % mode)
-    (_PARAMS["ao_only"], _PARAMS["use_ao"],
-     _PARAMS["default_material"]) = modes[mode]
+    (_PARAMS["ao_only"], _PARAMS["use_ao"], _PARAMS["default_material"],
+     _PARAMS["rough_only"]) = modes[mode]
     return mode
 
 
 def display_mode():
+    if _PARAMS["rough_only"]:
+        return "ROUGHNESS_ONLY"
     if _PARAMS["ao_only"]:
         return "AO_ONLY"
     if _PARAMS["default_material"]:
