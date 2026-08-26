@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.34.1
+
+- Put the key light's upward tilt back. 0.34.0 aimed it straight down the
+  view axis on the strength of a flat-plane reading, but a plane cannot show
+  where a light is. A shaded sphere can: Maya's puts its brightest point 15%
+  of the radius above centre, so the light is tilted. Flattening it made the
+  shading read as if lit from the wrong side.
+- Specular back to 0.30, which is what the tilt needs to reach Maya's peak.
+
+Known difference: Maya's blinn highlight is tighter and peaks about 12/255
+above its surrounding surface, this shader's Blinn-Phong lobe about 5. The
+lobe shape differs, not the level.
+
+## 0.34.0
+
+- **Maya's view transform is reproduced, so the whole grey ramp matches, not
+  just one point.** 0.33.0 matched the mid grey by lowering the diffuse
+  level, but Maya runs its viewport through a tone curve (ACES 1.0 SDR-video
+  by default) and no single multiplier can follow that. The curve was
+  measured out of Maya - a surfaceShader stepped through 16 known values,
+  read back off a playblast - and fitted into the shader. Worst error is
+  under 1/255 above black.
+- With the curve in place the levels are Maya's own again: diffuse 0.4
+  (blinn colour 0.5 x diffuse 0.8) and a 0.22 highlight.
+- **The key light points straight down the view axis**, like Maya's default
+  headlight. It used to be tilted 0.25 up, which shifted the shading gradient
+  across every surface.
+- A flat plane facing the camera now reads 148/255 unlit-side and 179/255 at
+  the highlight, against Maya's 146 and 179.
+- `Settings` gained a `Maya Tone Curve` switch beside the two levels, for a
+  Maya set to plain sRGB rather than ACES.
+
+## 0.33.0
+
+- **The viewport greys now match Maya.** The shading levels were guesses;
+  they are measured now. A flat plane facing the camera, shaded by a default
+  blinn (colour 0.5, diffuse 0.8) under the default headlight, reads 146/255
+  in Maya 2025 and 179/255 with the highlight. The QC viewport was painting
+  183 and 187 - visibly lighter. Diffuse went 0.5 -> 0.304 and specular
+  0.3 -> 0.23, which lands on 145 and 180.
+- Both levels are exposed in `Settings` under `Maya Match`. The calibration
+  assumes Maya's default ACES 1.0 SDR-video view transform; a Maya set to
+  plain sRGB wants roughly 0.4 diffuse instead.
+
+## 0.32.0
+
+- **Checkbox next to `Find Textures`, on by default.** One press now fills
+  every material on every selected object, so a set that arrives as twenty
+  one-material meshes takes one press instead of one per material. Untick it
+  to go back to filling only the active slot. The state is remembered.
+- Fixed: files named per UDIM tile (`bake_1001_ao`, `bake_1002_ao`) were
+  merged into a single tiled image, so every material got tile 1001. When the
+  material name carries the tile number (`vzor_1002`), the files are treated
+  as separate sets and each material takes its own.
+
+## 0.31.0
+
+- **Fixed: Find Textures did not open on the imported mesh's folder.** Two
+  things were wrong. The import tracker read the path off the operator
+  history, but Blender never puts importers there; it now asks the window
+  manager for the properties each importer was last called with, which does
+  hold the path. And the handler was not marked persistent, so Blender threw
+  it away the moment a .blend was opened.
+- When an object carries no recorded path and the name search finds nothing,
+  the browser falls back to the folder of the last import rather than opening
+  nowhere. That covers everything imported before this version.
+
 ## 0.30.4
 
 - **Fixed the viewport going black on part of the scene.** `Roughness Only`

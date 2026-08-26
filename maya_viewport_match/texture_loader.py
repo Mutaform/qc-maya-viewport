@@ -386,8 +386,13 @@ def scan_folder(directory, recursive=True):
     return found
 
 
-def _collapse_udim(entries):
-    """Group the UDIM tiles of one map into a single entry with a tile list."""
+def _collapse_udim(entries, keep_tiles=()):
+    """Group the UDIM tiles of one map into a single entry with a tile list.
+
+    *keep_tiles* holds tile numbers that appear in the material or object
+    name. Those are not tiles of one texture at all - they are separate sets
+    named per tile, one per material - so they must stay apart.
+    """
     groups = {}
     for entry in entries:
         key = (
@@ -407,6 +412,9 @@ def _collapse_udim(entries):
         if len(members) == 1 or len(tiles) != len(members):
             collapsed.extend(members)
             continue
+        if any(tile in keep_tiles for tile in tiles):
+            collapsed.extend(members)
+            continue
         members.sort(key=lambda member: member["udim"])
         first = dict(members[0])
         first["tiles"] = tiles
@@ -421,7 +429,14 @@ def resolve(entries, material_name, object_name="", match_names=True):
     material name, every file stays in the running so a folder holding a
     single texture set still gets assigned.
     """
-    entries = _collapse_udim(entries)
+    # A number like 1002 in the material name means the tile is part of the
+    # asset's naming, not a UDIM set to be merged.
+    named_tiles = {
+        int(token)
+        for token in _tokens(material_name) + _tokens(object_name)
+        if _is_udim(token)
+    }
+    entries = _collapse_udim(entries, named_tiles)
     if not entries:
         return {}, False, 0.0
 
@@ -429,9 +444,16 @@ def resolve(entries, material_name, object_name="", match_names=True):
     object_tokens = _strip_prefix(_tokens(object_name))
     scores = {}
     for index, entry in enumerate(entries):
-        score = match_score(material_tokens, entry["tokens"])
-        if object_tokens:
-            score = max(score, 0.9 * match_score(object_tokens, entry["tokens"]))
+        candidates = [entry["tokens"]]
+        if entry.get("udim") is not None and not entry.get("tiles"):
+            # Score the tile number too, so bake_1002 beats bake_1001 for a
+            # material called vzor_1002.
+            candidates.append(entry["tokens"] + [str(entry["udim"])])
+        score = 0.0
+        for tokens in candidates:
+            score = max(score, match_score(material_tokens, tokens))
+            if object_tokens:
+                score = max(score, 0.9 * match_score(object_tokens, tokens))
         scores[index] = score
 
     best = max(scores.values())

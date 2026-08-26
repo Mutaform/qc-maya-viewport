@@ -179,15 +179,35 @@ class MVM_OT_reimport_textures(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def _target_materials(obj, all_slots):
+def _target_pairs(context, all_slots):
+    """The (object, material) pairs one run should fill.
+
+    With the box ticked this covers every material on every selected object,
+    so a set that arrives as several one-material meshes takes one press
+    instead of one press each.
+    """
+    obj = context.active_object
     if not all_slots:
-        material = obj.active_material
-        return [material] if material is not None else []
-    materials = []
-    for slot in obj.material_slots:
-        if slot.material is not None and slot.material not in materials:
-            materials.append(slot.material)
-    return materials
+        material = getattr(obj, "active_material", None)
+        return [(obj, material)] if material is not None else []
+
+    objects = [
+        item for item in context.selected_objects
+        if item.type == "MESH" and item.material_slots
+    ]
+    if obj is not None and obj not in objects and obj.material_slots:
+        objects.append(obj)
+
+    pairs = []
+    seen = set()
+    for item in objects:
+        for slot in item.material_slots:
+            material = slot.material
+            if material is None or material.name in seen:
+                continue
+            seen.add(material.name)
+            pairs.append((item, material))
+    return pairs
 
 
 class MVM_OT_load_textures(bpy.types.Operator):
@@ -224,9 +244,12 @@ class MVM_OT_load_textures(bpy.types.Operator):
         default=True,
     )
     all_slots: bpy.props.BoolProperty(
-        name="All Material Slots",
-        description="Fill every material on the object, not just the active one",
-        default=False,
+        name="All Selected Objects",
+        description=(
+            "Fill every material on every selected object in one go, instead "
+            "of only the active material slot"
+        ),
+        default=True,
     )
     set_convention: bpy.props.BoolProperty(
         name="Normal Convention From Name",
@@ -239,18 +262,23 @@ class MVM_OT_load_textures(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        obj = context.active_object
-        if obj is None:
+        if context.active_object is None and not context.selected_objects:
             cls.poll_message_set("Select an object first")
             return False
-        if obj.active_material is None:
-            cls.poll_message_set("The active object has no material")
+        objects = list(context.selected_objects)
+        if context.active_object is not None:
+            objects.append(context.active_object)
+        if not any(obj.material_slots for obj in objects):
+            cls.poll_message_set("Nothing selected carries a material")
             return False
         return True
 
     def invoke(self, context, event):
+        prefs = preferences.apply(context)
+        if prefs is not None:
+            # The checkbox next to the button is the setting that sticks.
+            self.all_slots = prefs.all_slots
         if not self.directory:
-            prefs = preferences.apply(context)
             roots = [root.path for root in prefs.roots] if prefs else []
             origin.clear_cache()
             self.directory = origin.resolve_directory(context, roots)
@@ -274,10 +302,9 @@ class MVM_OT_load_textures(bpy.types.Operator):
             self.report({"ERROR"}, "Pick a folder that holds the textures")
             return {"CANCELLED"}
 
-        obj = context.active_object
-        materials = _target_materials(obj, self.all_slots)
-        if not materials:
-            self.report({"ERROR"}, "The active object has no material")
+        pairs = _target_pairs(context, self.all_slots)
+        if not pairs:
+            self.report({"ERROR"}, "Nothing selected carries a material")
             return {"CANCELLED"}
 
         preferences.apply(context)
@@ -292,16 +319,19 @@ class MVM_OT_load_textures(bpy.types.Operator):
 
         convention = None
         total = 0
+        filled = 0
         lines = []
-        for material in materials:
+        for obj, material in pairs:
             picked, matched, score = texture_loader.resolve(
-                entries, material.name, obj.name, self.match_names
+                entries, material.name, obj.name if obj else "",
+                self.match_names,
             )
             if not picked:
                 lines.append("%s: no texture matched" % material.name)
                 continue
             report = texture_loader.apply_maps(material, picked)
             total += len(report["assigned"])
+            filled += 1
             source = "name match" if matched else "folder contents"
             lines.append(
                 "%s (%s, score %d): %s" % (
@@ -332,12 +362,12 @@ class MVM_OT_load_textures(bpy.types.Operator):
             self.report(
                 {"WARNING"},
                 "Found %d textures but none matched %s"
-                % (len(entries), materials[0].name),
+                % (len(entries), pairs[0][1].name),
             )
             return {"CANCELLED"}
 
-        message = "Linked %d textures into %d material(s)" % (
-            total, len(materials)
+        message = "Linked %d textures into %d of %d material(s)" % (
+            total, filled, len(pairs)
         )
         if convention is not None and self.set_convention:
             message += "; normals set to %s" % convention.title()

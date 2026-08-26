@@ -32,18 +32,26 @@ _VERTEX_DEPTH_BIAS = 7.5e-7
 _DEPTH_BIAS_REFERENCE_DISTANCE = 4.0
 _DEPTH_BIAS_MIN_SCALE = 0.25
 _DEPTH_BIAS_MAX_SCALE = 64.0
+# Maya's own numbers now that the view transform is reproduced below:
+# blinn colour 0.5 x diffuse 0.8 = 0.4, and a highlight that peaks 0.22
+# above it.
 _PARAMS = {
-    "diffuse": 0.50,
+    "diffuse": 0.40,
     "specular": 0.30,
     "exponent": 44.0,
     "fill": 0.0,
     "light_x": 0.0,
+    # Maya's default light is not a pure headlight: a sphere shaded in Maya
+    # puts its brightest point 15% of the radius above centre, so the key is
+    # tilted up. Zeroing this flattened the gradient and read as lit from the
+    # wrong side.
     "light_y": 0.25,
     "ao_only": 0,
     "rough_only": 0,
     "use_ao": 1,
     "default_material": 0,
     "directx_normal": 0,
+    "tone_map": 1,
 }
 
 
@@ -185,6 +193,7 @@ def _create_shader():
     info.push_constant("INT", "isPerspective")
     info.push_constant("INT", "directXNormal")
     info.push_constant("INT", "rebuildNormalZ")
+    info.push_constant("INT", "toneMap")
     info.push_constant("INT", "alphaEnabled")
     info.push_constant("INT", "alphaChannel")
     info.push_constant("INT", "alphaClip")
@@ -216,6 +225,18 @@ def _create_shader():
     )
     info.fragment_source(
         """
+        // Maya puts its viewport through a view transform - ACES 1.0
+        // SDR-video by default - so the same lighting maths lands on a very
+        // different grey. This is that curve, fitted to values measured
+        // straight out of Maya 2025 (worst error under 1/255 above black),
+        // and expressed so a plain sRGB encode reproduces Maya's pixels.
+        vec3 mayaTone(vec3 x)
+        {
+            x = max(x, vec3(0.0));
+            return (x * (4.438783 * x + 0.223256))
+                 / (x * (4.790552 * x + 1.275352) + 1.391279);
+        }
+
         vec3 pickChannel(vec4 value, int channel)
         {
             if (channel == 0) {
@@ -311,6 +332,9 @@ def _create_shader():
             float specular = defaultMaterial == 0
                 ? specularLevel * pow(max(dot(n, halfVector), 0.0), blinnExponent) : 0.0;
             vec3 color = diffuse + vec3(specular);
+            if (toneMap != 0) {
+                color = mayaTone(color);
+            }
             fragColor = vec4(color, opacity);
         }
         """
@@ -1092,6 +1116,7 @@ def _draw():
         shader.uniform_int("roughChannel", -1)
         shader.uniform_int("roughOnly", _PARAMS["rough_only"])
         shader.uniform_int("rebuildNormalZ", 0)
+        shader.uniform_int("toneMap", _PARAMS["tone_map"])
         shader.uniform_int("alphaEnabled", 0)
         shader.uniform_int("alphaChannel", 0)
         shader.uniform_int("alphaClip", 0)
@@ -1254,6 +1279,32 @@ def purge_stale_handlers():
     return True
 
 
+def set_shading_levels(diffuse=None, specular=None, tone_map=None):
+    """Set the levels and curve the Maya match is calibrated on."""
+    if diffuse is not None:
+        _PARAMS["diffuse"] = float(diffuse)
+    if specular is not None:
+        _PARAMS["specular"] = float(specular)
+    if tone_map is not None:
+        _PARAMS["tone_map"] = int(bool(tone_map))
+
+
+def adopt_match_levels():
+    """Take the levels from the add-on preferences, if they are set."""
+    try:
+        addon = bpy.context.preferences.addons.get(__package__)
+    except AttributeError:
+        return
+    prefs = getattr(addon, "preferences", None)
+    if prefs is None:
+        return
+    set_shading_levels(
+        getattr(prefs, "match_diffuse", None),
+        getattr(prefs, "match_specular", None),
+        getattr(prefs, "match_tone_curve", None),
+    )
+
+
 def adopt_scene_convention(context):
     """Take the green-channel setting from the scene's Normal Map nodes.
 
@@ -1277,6 +1328,7 @@ def adopt_scene_convention(context):
 def enable(context):
     global _HANDLER
     purge_stale_handlers()
+    adopt_match_levels()
     adopt_scene_convention(context)
     if _HANDLER is not None:
         return

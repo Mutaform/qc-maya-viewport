@@ -1,6 +1,7 @@
 import bpy
 
 from . import custom_engine
+from . import preferences
 from .metadata import VERSION_STRING
 
 
@@ -45,11 +46,15 @@ class MVM_PT_custom_shading(bpy.types.Panel):
             )
             operator.mode = mode
         layout.separator()
-        layout.operator(
+        row = layout.row(align=True)
+        row.operator(
             "mvm.load_textures",
             text="Find Textures",
             icon="FILEBROWSER",
         )
+        prefs = preferences.get(context)
+        if prefs is not None:
+            row.prop(prefs, "all_slots", text="")
         layout.operator(
             "mvm.reimport_textures",
             text="Reimport Textures",

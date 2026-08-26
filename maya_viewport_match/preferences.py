@@ -90,6 +90,21 @@ def mark_dirty(context=None):
         pass
 
 
+def _push_levels(self, context):
+    from . import custom_engine
+    custom_engine.set_shading_levels(
+        self.match_diffuse, self.match_specular, self.match_tone_curve
+    )
+    mark_dirty(context)
+    try:
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == "VIEW_3D":
+                    area.tag_redraw()
+    except AttributeError:
+        pass
+
+
 def _sync_name(self, context):
     self.name = self.suffix
     mark_dirty(context)
@@ -277,6 +292,17 @@ def draw_rules(layout, prefs):
     save.operator("wm.save_userpref", text="Save Preferences", icon="FILE_TICK")
 
     layout.separator()
+    layout.label(text="Maya Match")
+    layout.label(
+        text="Calibrated on Maya 2025, blinn 0.5 x 0.8, ACES view transform",
+        icon="INFO",
+    )
+    layout.prop(prefs, "match_tone_curve")
+    levels = layout.row(align=True)
+    levels.prop(prefs, "match_diffuse")
+    levels.prop(prefs, "match_specular")
+
+    layout.separator()
     layout.label(text="Project Roots")
     layout.label(
         text="Folders searched for the asset an object was imported from",
@@ -313,6 +339,40 @@ class MVM_OT_suffix_settings(bpy.types.Operator):
 class MVM_Preferences(bpy.types.AddonPreferences):
     bl_idname = ADDON_ID
 
+    match_tone_curve: bpy.props.BoolProperty(
+        name="Maya Tone Curve",
+        description=(
+            "Reproduce Maya's view transform, measured off Maya 2025 with "
+            "its default ACES 1.0 SDR-video setting. Turn off if your Maya "
+            "shows the viewport through plain sRGB"
+        ),
+        default=True,
+        update=_push_levels,
+    )
+    match_diffuse: bpy.props.FloatProperty(
+        name="Diffuse Level",
+        description=(
+            "Brightness of the lit surface. 0.4 is Maya's own default blinn: "
+            "colour 0.5 times diffuse 0.8"
+        ),
+        default=0.40, min=0.0, max=2.0, step=1, precision=3,
+        update=_push_levels,
+    )
+    match_specular: bpy.props.FloatProperty(
+        name="Specular Level",
+        description="Strength of the highlight, measured against Maya's blinn",
+        default=0.30, min=0.0, max=2.0, step=1, precision=3,
+        update=_push_levels,
+    )
+    all_slots: bpy.props.BoolProperty(
+        name="All Selected Objects",
+        description=(
+            "Find Textures fills every material on every selected object in "
+            "one go, instead of only the active material slot"
+        ),
+        default=True,
+        update=lambda self, context: mark_dirty(context),
+    )
     rules: bpy.props.CollectionProperty(type=MVM_SuffixRule)
     active_rule: bpy.props.IntProperty(default=0)
     roots: bpy.props.CollectionProperty(type=MVM_ProjectRoot)

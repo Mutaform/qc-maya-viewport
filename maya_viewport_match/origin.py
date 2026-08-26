@@ -52,29 +52,89 @@ def _score(target_tokens, name):
 # Recording the path of anything imported from now on
 # --------------------------------------------------------------------------
 
-def _last_import_path():
-    """The file the most recent import operator read, if that is what ran."""
+# Importers worth asking about, best guess first.
+IMPORTERS = (
+    "import_scene.fbx",
+    "wm.obj_import",
+    "wm.usd_import",
+    "wm.alembic_import",
+    "wm.stl_import",
+    "wm.ply_import",
+    "import_scene.gltf",
+    "wm.collada_import",
+)
+
+_LAST_SEEN = {}
+
+
+def _importer_paths():
+    """The file each importer was last pointed at, this session."""
+    paths = {}
     try:
-        history = bpy.context.window_manager.operators
+        window_manager = bpy.context.window_manager
     except AttributeError:
+        return paths
+    for idname in IMPORTERS:
+        try:
+            props = window_manager.operator_properties_last(idname)
+        except (AttributeError, TypeError, RuntimeError):
+            continue
+        if props is None:
+            continue
+        path = getattr(props, "filepath", "")
+        if not path:
+            directory = getattr(props, "directory", "")
+            filename = getattr(props, "filename", "")
+            path = os.path.join(directory, filename) if directory else ""
+        if path and os.path.isfile(bpy.path.abspath(path)):
+            paths[idname] = path
+    return paths
+
+
+def last_import_path():
+    """The file the import that just ran most likely read.
+
+    Blender keeps no operator history for importers, but it does remember the
+    properties each operator was last called with, which is where the path
+    comes from. When several importers have been used, the one whose path
+    changed since the last look is the one that just ran.
+    """
+    paths = _importer_paths()
+    if not paths:
         return None
-    if not history:
-        return None
-    operator = history[-1]
-    idname = operator.bl_idname
-    if not (idname.startswith("IMPORT_") or idname.startswith("WM_OT_")):
-        return None
-    path = getattr(operator, "filepath", "")
-    if not path:
-        directory = getattr(operator, "directory", "")
-        filename = getattr(operator, "filename", "")
-        path = os.path.join(directory, filename) if directory else ""
-    if not path:
+    changed = [
+        idname for idname, path in paths.items()
+        if _LAST_SEEN.get(idname) != path
+    ]
+    _LAST_SEEN.clear()
+    _LAST_SEEN.update(paths)
+    for idname in IMPORTERS:
+        if idname in changed:
+            return paths[idname]
+    for idname in IMPORTERS:
+        if idname in paths:
+            return paths[idname]
+    return None
+
+
+def _last_import_path():
+    path = last_import_path()
+    if path is None:
         return None
     extension = os.path.splitext(path)[1].lower()
     return path if extension in MODEL_EXTENSIONS else None
 
 
+@bpy.app.handlers.persistent
+def _reset_baseline(*_args):
+    """Opening a file replaces every object; take the count afresh."""
+    global _OBJECT_COUNT
+    _OBJECT_COUNT = -1
+    _LAST_SEEN.clear()
+    clear_cache()
+
+
+@bpy.app.handlers.persistent
 def _track_new_objects(_scene, _depsgraph):
     """Stamp objects that just appeared with the file they came from."""
     global _OBJECT_COUNT
@@ -99,15 +159,21 @@ def register_handler():
     # bpy.data is off limits while add-ons register, so let the first
     # depsgraph update take the baseline instead.
     _OBJECT_COUNT = -1
+    # Both handlers are persistent: Blender drops the rest on file load, and
+    # this one has to survive to keep recording imports.
     bpy.app.handlers.depsgraph_update_post.append(_track_new_objects)
+    bpy.app.handlers.load_post.append(_reset_baseline)
 
 
 def unregister_handler():
-    handlers = bpy.app.handlers.depsgraph_update_post
-    handlers[:] = [
-        handler for handler in handlers
-        if getattr(handler, "__name__", "") != "_track_new_objects"
-    ]
+    for handlers, name in (
+        (bpy.app.handlers.depsgraph_update_post, "_track_new_objects"),
+        (bpy.app.handlers.load_post, "_reset_baseline"),
+    ):
+        handlers[:] = [
+            handler for handler in handlers
+            if getattr(handler, "__name__", "") != name
+        ]
 
 
 def recorded_folder(obj):
@@ -319,6 +385,14 @@ def resolve_directory(context, roots=()):
             return _texture_folder_near(
                 asset, material.name if material else ""
             )
+
+    # Nothing tied to this object worked out. The folder the last import came
+    # from still beats opening the browser at nowhere in particular.
+    recent = last_import_path()
+    if recent:
+        folder = os.path.dirname(bpy.path.abspath(recent))
+        if os.path.isdir(folder):
+            return folder
 
     if bpy.data.filepath:
         return os.path.dirname(bpy.data.filepath)
