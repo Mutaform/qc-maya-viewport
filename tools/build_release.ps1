@@ -3,7 +3,19 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $addonDir = Join-Path $repoRoot "maya_viewport_match"
 $manifest = Join-Path $addonDir "blender_manifest.toml"
-$distDir = Join-Path $repoRoot "dist"
+# Build output. On CI it has to be the repository root, because the workflow
+# publishes from the checkout. Locally it goes to the project's Dev folder
+# beside the repository, so the working copy holds only the files that are
+# actually in the repository.
+if ($env:GITHUB_ACTIONS -eq 'true') {
+    $outRoot = $repoRoot
+} else {
+    $outRoot = Join-Path (Split-Path -Parent $repoRoot) "Dev"
+    if (-not (Test-Path -LiteralPath $outRoot)) {
+        New-Item -ItemType Directory -Force -Path $outRoot | Out-Null
+    }
+}
+$distDir = Join-Path $outRoot "dist"
 $zipPath = Join-Path $distDir "maya_viewport_match.zip"
 
 if (-not (Test-Path -LiteralPath $manifest)) {
